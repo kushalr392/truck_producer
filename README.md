@@ -1,6 +1,6 @@
-# Truck Telematics Kafka Producer
+# Truck Telematics Simulator
 
-This project simulates a Kafka producer for truck telematics data. It generates random data for a set of vehicles and pushes it to a Kafka topic.
+This Python script simulates truck telematics data and produces it to a Kafka topic.
 
 ## Data Schema
 - `vehicle_id`: Unique identifier for the truck.
@@ -9,29 +9,35 @@ This project simulates a Kafka producer for truck telematics data. It generates 
 - `lng`: Longitude.
 - `isCargoAttached`: Boolean indicating if cargo is attached.
 - `status`: "online" or "offline".
-- `timestamp`: UTC ISO timestamp.
+- `timestamp`: UTC timestamp.
 
 ## Setup
 
-### 1. Environment Variables
-Update the `env_vars.json` file with your Kafka credentials:
-- `KAFKA_BOOTSTRAP_SERVERS`
-- `TOPIC_NAME`
-- `KAFKA_SASL_USERNAME`
-- `KAFKA_SASL_PASSWORD`
+### Environment Variables
+Create a `.env` file or export the following variables:
+- `KAFKA_BOOTSTRAP_SERVERS`: Kafka broker addresses.
+- `KAFKA_TOPIC`: Kafka topic name.
+- `KAFKA_USERNAME`: SASL username.
+- `KAFKA_PASSWORD`: SASL password.
+- `PRODUCER_DELAY`: (Optional) Delay between messages in seconds (default: 1.0).
 
-### 2. Local Execution
-```bash
-pip install -r requirements.txt
-python producer.py
-```
+### Running Locally
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Set environment variables.
+3. Run the script:
+   ```bash
+   python telematics_producer.py
+   ```
 
-### 3. Docker Execution
-```bash
-docker build -t truck-producer .
-docker run --env-file <(jq -r 'to_entries|map("\(.key)=\(.value)")|.[]' env_vars.json) truck-producer
-```
-*(Or simply ensure the `env_vars.json` is copied into the image, which it is by default in the Dockerfile instructions).*
-
-## Kafka Security
-This script is configured to use `SASL_PLAINTEXT` with `SCRAM-SHA-512` as per requirements.
+### Running with Docker
+1. Build the image:
+   ```bash
+   docker build -t truck-telematics-simulator .
+   ```
+2. Run the container:
+   ```bash
+   docker run --env-file .env truck-telematics-simulator
+   ```

@@ -7,176 +7,131 @@ import pytest
 import sys
 import os
 import json
-from unittest.mock import patch, MagicMock, mock_open
+import datetime
+from unittest.mock import patch, MagicMock, PropertyMock
 
 # Add source directory to path so imports work
 sys.path.insert(0, os.path.dirname(__file__))
 
 # Import modules under test
-from producer import load_env_vars, on_send_success, on_send_error, generate_telematics, main
+import telematics_producer
 
 # ── Fixtures ──────────────────────────────────────────────────
 
 @pytest.fixture
-def mock_env_vars():
-    """Provides a standard set of mock environment variables."""
-    return {
-        "KAFKA_BOOTSTRAP_SERVERS": "localhost:9092",
-        "TOPIC_NAME": "test-topic",
-        "KAFKA_SASL_USERNAME": "user",
-        "KAFKA_SASL_PASSWORD": "password"
-    }
+def mock_env_vars(monkeypatch):
+    """Mocks environment variables for Kafka and producer configuration."""
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    monkeypatch.setenv("KAFKA_TOPIC", "test_topic")
+    monkeypatch.setenv("KAFKA_USERNAME", "test_user")
+    monkeypatch.setenv("KAFKA_PASSWORD", "test_pass")
+    monkeypatch.setenv("PRODUCER_DELAY", "0.1")
 
 @pytest.fixture
-def mock_record_metadata():
-    """Provides a mock Kafka record metadata object."""
-    metadata = MagicMock()
-    metadata.topic = "test-topic"
-    metadata.partition = 0
-    metadata.offset = 123
-    return metadata
+def mock_kafka_producer():
+    """Mocks the KafkaProducer class."""
+    with patch("telematics_producer.KafkaProducer") as mock:
+        yield mock
 
 # ── Unit Tests ────────────────────────────────────────────────
 
-class TestEnvLoading:
-    """Tests for environment variable and config loading."""
+class TestTelematicsProducer:
 
-    @patch('os.path.exists')
-    @patch('builtins.open', new_callable=mock_open, read_data='{"KAFKA_BOOTSTRAP_SERVERS": "file_server", "TOPIC_NAME": "file_topic"}')
-    def test_load_env_vars_from_file(self, mock_file, mock_exists):
-        """Tests that config is loaded from env_vars.json if it exists."""
-        mock_exists.return_value = True
-        config = load_env_vars()
-        assert config["KAFKA_BOOTSTRAP_SERVERS"] == "file_server"
-        assert config["TOPIC_NAME"] == "file_topic"
-        mock_file.assert_called_with('env_vars.json', 'r')
+    def test_get_producer_success(self, mock_env_vars, mock_kafka_producer):
+        """Tests successful initialization of Kafka producer."""
+        producer = telematics_producer.get_producer()
+        assert producer is not None
+        mock_kafka_producer.assert_called_once()
+        args, kwargs = mock_kafka_producer.call_args
+        assert kwargs['bootstrap_servers'] == "localhost:9092"
+        assert kwargs['sasl_plain_username'] == "test_user"
 
-    @patch('os.path.exists')
-    @patch('os.getenv')
-    def test_load_env_vars_from_env(self, mock_getenv, mock_exists):
-        """Tests that config is loaded from environment variables if file is missing."""
-        mock_exists.return_value = False
+    def test_get_producer_failure(self, mock_env_vars, mock_kafka_producer):
+        """Tests Kafka producer initialization failure."""
+        mock_kafka_producer.side_effect = Exception("Connection error")
+        producer = telematics_producer.get_producer()
+        assert producer is None
+
+    @pytest.mark.parametrize("vehicle_id", ["TRUCK_001", "TRUCK_999", "TEST_VEHICLE"])
+    def test_generate_telematics_data_structure(self, vehicle_id):
+        """Tests that generated telematics data has correct structure and types."""
+        data = telematics_producer.generate_telematics_data(vehicle_id)
         
-        def side_effect(key, default=None):
-            env = {
-                "KAFKA_BOOTSTRAP_SERVERS": "env_server",
-                "TOPIC_NAME": "env_topic",
-                "KAFKA_SASL_USERNAME": "env_user",
-                "KAFKA_SASL_PASSWORD": "env_pass"
-            }
-            return env.get(key)
-        
-        mock_getenv.side_effect = side_effect
-        
-        config = load_env_vars()
-        assert config["KAFKA_BOOTSTRAP_SERVERS"] == "env_server"
-        assert config["TOPIC_NAME"] == "env_topic"
-        assert config["KAFKA_SASL_USERNAME"] == "env_user"
-
-class TestCallbacks:
-    """Tests for Kafka producer callbacks."""
-
-    @patch('producer.logger')
-    def test_on_send_success(self, mock_logger, mock_record_metadata):
-        """Tests successful message delivery logging."""
-        on_send_success(mock_record_metadata)
-        mock_logger.info.assert_called()
-        log_msg = mock_logger.info.call_args[0][0]
-        assert "test-topic" in log_msg
-        assert "offset 123" in log_msg
-
-    @patch('producer.logger')
-    def test_on_send_error(self, mock_logger):
-        """Tests failed message delivery logging."""
-        exception = Exception("Kafka Error")
-        on_send_error(exception)
-        mock_logger.error.assert_called_with("Message delivery failed: Kafka Error")
-
-class TestTelematicsGeneration:
-    """Tests for telematics data generation."""
-
-    def test_generate_telematics_structure(self):
-        """Tests the structure and required keys of generated telematics."""
-        v_id = "TRUCK-001"
-        data = generate_telematics(v_id)
-        
-        expected_keys = {"vehicle_id", "speed", "lat", "lng", "isCargoAttached", "status", "timestamp"}
-        assert set(data.keys()) == expected_keys
-        assert data["vehicle_id"] == v_id
-
-    @pytest.mark.parametrize("iteration", range(5))
-    def test_generate_telematics_ranges(self, iteration):
-        """Tests that generated values are within expected boundaries."""
-        data = generate_telematics("TEST")
-        assert 0 <= data["speed"] <= 110
-        assert -90 <= data["lat"] <= 90
-        assert -180 <= data["lng"] <= 180
-        assert data["status"] in ["online", "offline"]
-        assert isinstance(data["isCargoAttached"], bool)
-
-# ── Integration & Workflow Tests ──────────────────────────────
-
-class TestMainWorkflow:
-    """Tests for the main execution loop and setup."""
-
-    @patch('producer.KafkaProducer')
-    @patch('producer.load_env_vars')
-    @patch('producer.time.sleep', side_effect=KeyboardInterrupt)  # Break the infinite loop immediately
-    def test_main_startup_and_keyboard_interrupt(self, mock_sleep, mock_load, mock_producer_class, mock_env_vars):
-        """Tests that main initializes producer and handles KeyboardInterrupt gracefully."""
-        mock_load.return_value = mock_env_vars
-        mock_producer_instance = mock_producer_class.return_value
-        
-        # Run main - it will trigger KeyboardInterrupt on first sleep
-        main()
-        
-        # Check initialization
-        mock_producer_class.assert_called_once()
-        args, kwargs = mock_producer_class.call_args
-        assert kwargs['bootstrap_servers'] == ['localhost:9092']
-        assert kwargs['client_id'] == 'truck-telematics-producer'
-        
-        # Verify cleanup
-        mock_producer_instance.close.assert_called_once()
-
-    @patch('producer.KafkaProducer')
-    @patch('producer.load_env_vars')
-    @patch('producer.time.sleep')
-    @patch('producer.generate_telematics')
-    def test_main_message_sending(self, mock_gen, mock_sleep, mock_load, mock_producer_class, mock_env_vars):
-        """Tests that messages are sent for all vehicles in the list."""
-        mock_load.return_value = mock_env_vars
-        mock_producer_instance = mock_producer_class.return_value
-        mock_gen.return_value = {"data": "mock"}
-        
-        # We need to stop the loop after one iteration
-        # We can raise an exception after 5 calls (for 5 trucks) to mock_gen
-        mock_gen.side_effect = [{"data": f"truck_{i}"} for i in range(5)] + [KeyboardInterrupt()]
-        
-        try:
-            main()
-        except KeyboardInterrupt:
-            pass
+        required_keys = ["vehicle_id", "speed", "lat", "lng", "isCargoAttached", "status", "timestamp"]
+        for key in required_keys:
+            assert key in data
             
-        # 5 vehicles (TRUCK-001 to TRUCK-005)
-        assert mock_producer_instance.send.call_count == 5
-        mock_producer_instance.send.assert_any_call(
-            mock_env_vars["TOPIC_NAME"], 
-            key="TRUCK-001", 
-            value={"data": "truck_0"}
-        )
+        assert data["vehicle_id"] == vehicle_id
+        assert isinstance(data["speed"], float)
+        assert isinstance(data["lat"], float)
+        assert isinstance(data["lng"], float)
+        assert isinstance(data["isCargoAttached"], bool)
+        assert data["status"] in ["online", "offline"]
+        assert data["timestamp"].endswith("Z")
 
-    @patch('producer.KafkaProducer', side_effect=Exception("Connection failed"))
-    @patch('producer.load_env_vars')
-    @patch('producer.logger')
-    def test_main_init_failure(self, mock_logger, mock_load, mock_producer_class, mock_env_vars):
-        """Tests that initialization errors are caught and logged."""
-        mock_load.return_value = mock_env_vars
+    def test_generate_telematics_data_ranges(self):
+        """Tests that generated values are within expected ranges."""
+        for _ in range(100):
+            data = telematics_producer.generate_telematics_data("TEST")
+            assert 0 <= data["speed"] <= 110
+            assert -90 <= data["lat"] <= 90
+            assert -180 <= data["lng"] <= 180
+
+class TestMainLogic:
+
+    @patch("telematics_producer.get_producer")
+    @patch("telematics_producer.time.sleep")
+    @patch("telematics_producer.print")
+    def test_main_producer_failure(self, mock_print, mock_sleep, mock_get_producer):
+        """Tests main function behavior when producer fails to initialize."""
+        mock_get_producer.return_return_value = None
+        telematics_producer.main()
+        mock_print.assert_any_call("Failed to create producer. Exiting.")
+
+    @patch("telematics_producer.get_producer")
+    @patch("telematics_producer.time.sleep")
+    @patch("telematics_producer.generate_telematics_data")
+    def test_main_execution_loop(self, mock_gen, mock_sleep, mock_get_producer):
+        """Tests main loop execution and message sending."""
+        mock_producer = MagicMock()
+        mock_get_producer.return_value = mock_producer
         
-        main()
+        # Mock future returned by producer.send
+        mock_future = MagicMock()
+        mock_metadata = MagicMock()
+        mock_metadata.topic = "test_topic"
+        mock_metadata.partition = 0
+        mock_future.get.return_value = mock_metadata
+        mock_producer.send.return_value = mock_future
+
+        # Use side_effect on sleep to raise KeyboardInterrupt and break the while loop
+        mock_sleep.side_effect = KeyboardInterrupt()
+
+        telematics_producer.main()
+
+        # Should have attempted to send data for 5 trucks (TRUCK_001 to TRUCK_005)
+        assert mock_producer.send.call_count == 5
+        assert mock_producer.close.called
+        assert mock_gen.call_count == 5
+
+    @patch("telematics_producer.get_producer")
+    @patch("telematics_producer.time.sleep")
+    @patch("telematics_producer.print")
+    def test_main_send_exception_handling(self, mock_print, mock_sleep, mock_get_producer):
+        """Tests that exceptions during individual message sending are handled."""
+        mock_producer = MagicMock()
+        mock_get_producer.return_value = mock_producer
         
-        mock_logger.error.assert_called()
-        assert "Failed to initialize Kafka producer" in mock_logger.error.call_args[0][0]
+        # Mock send to raise exception
+        mock_producer.send.side_effect = Exception("Send failed")
+        
+        mock_sleep.side_effect = KeyboardInterrupt()
+
+        telematics_producer.main()
+
+        # Check if error message was printed
+        error_calls = [call for call in mock_print.call_args_list if "Error producing message" in str(call)]
+        assert len(error_calls) > 0
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

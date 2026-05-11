@@ -1,0 +1,37 @@
+[
+  {
+    "env_name": "KAFKA_BOOTSTRAP_SERVERS",
+    "variable_type": "String",
+    "mandatory": true,
+    "default_value": null,
+    "about_variable": "Comma-separated list of Kafka broker addresses"
+  },
+  {
+    "env_name": "KAFKA_TOPIC",
+    "variable_type": "Output Topic",
+    "mandatory": true,
+    "default_value": "truck_telematics",
+    "about_variable": "The Kafka topic to produce data to"
+  },
+  {
+    "env_name": "KAFKA_USERNAME",
+    "variable_type": "String",
+    "mandatory": true,
+    "default_value": null,
+    "about_variable": "SASL username for Kafka authentication"
+  },
+  {
+    "env_name": "KAFKA_PASSWORD",
+    "variable_type": "Password",
+    "mandatory": true,
+    "default_value": null,
+    "about_variable": "SASL password for Kafka authentication"
+  },
+  {
+    "env_name": "PRODUCER_DELAY",
+    "variable_type": "Float",
+    "mandatory": false,
+    "default_value": "1.0",
+    "about_variable": "Delay in seconds between each message production"
+  }
+]
