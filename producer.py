@@ -4,7 +4,7 @@ import random
 import os
 import logging
 from datetime import datetime
-from confluent_kafka import Producer
+from kafka import KafkaProducer
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -23,12 +23,13 @@ def load_env_vars():
         "KAFKA_SASL_PASSWORD": os.getenv("KAFKA_SASL_PASSWORD")
     }
 
-def delivery_report(err, msg):
-    """Callback for message delivery reports."""
-    if err is not None:
-        logger.error(f"Message delivery failed: {err}")
-    else:
-        logger.info(f"Message delivered to {msg.topic()} [{msg.partition()}]")
+def on_send_success(record_metadata):
+    """Success callback for message delivery."""
+    logger.info(f"Message delivered to {record_metadata.topic} [{record_metadata.partition}] offset {record_metadata.offset}")
+
+def on_send_error(excp):
+    """Error callback for message delivery."""
+    logger.error(f"Message delivery failed: {excp}")
 
 def generate_telematics(vehicle_id):
     """Generate mock truck telematics data."""
@@ -45,18 +46,24 @@ def generate_telematics(vehicle_id):
 def main():
     config = load_env_vars()
     
-    kafka_conf = {
-        'bootstrap.servers': config['KAFKA_BOOTSTRAP_SERVERS'],
-        'security.protocol': 'SASL_PLAINTEXT',
-        'sasl.mechanism': 'SCRAM-SHA-512',
-        'sasl.username': config['KAFKA_SASL_USERNAME'],
-        'sasl.password': config['KAFKA_SASL_PASSWORD'],
-        'client.id': 'truck-telematics-producer',
-        'retries': 5,
-        'retry.backoff.ms': 500
-    }
+    # Initialize KafkaProducer
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=config['KAFKA_BOOTSTRAP_SERVERS'].split(','),
+            security_protocol='SASL_PLAINTEXT',
+            sasl_mechanism='SCRAM-SHA-512',
+            sasl_plain_username=config['KAFKA_SASL_USERNAME'],
+            sasl_plain_password=config['KAFKA_SASL_PASSWORD'],
+            retries=5,
+            retry_backoff_ms=500,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            key_serializer=lambda k: k.encode('utf-8') if k else None,
+            client_id='truck-telematics-producer'
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize Kafka producer: {e}")
+        return
 
-    producer = Producer(kafka_conf)
     topic = config['TOPIC_NAME']
     vehicle_ids = [f"TRUCK-{i:03d}" for i in range(1, 6)]
 
@@ -66,21 +73,20 @@ def main():
         while True:
             for v_id in vehicle_ids:
                 data = generate_telematics(v_id)
-                producer.produce(
-                    topic, 
-                    key=v_id, 
-                    value=json.dumps(data).encode('utf-8'),
-                    callback=delivery_report
-                )
+                # Async send
+                future = producer.send(topic, key=v_id, value=data)
+                
+                # Add callbacks
+                future.add_callback(on_send_success)
+                future.add_errback(on_send_error)
             
-            # Flush to ensure messages are sent and callbacks are triggered
-            producer.poll(0)
             time.sleep(2)  # Adjust frequency as needed
             
     except KeyboardInterrupt:
         logger.info("Stopping producer...")
     finally:
-        producer.flush()
+        # Close producer to flush messages
+        producer.close(timeout=10)
 
 if __name__ == "__main__":
     main()
